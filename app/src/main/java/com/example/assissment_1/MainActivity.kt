@@ -1,5 +1,6 @@
 package com.example.assissment_1
 
+import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -46,7 +47,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.assissment_1.ui.theme.Assissment_1Theme
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import org.json.JSONObject
+import java.io.IOException
+import java.net.HttpURLConnection
+import java.net.URL
+import java.util.Locale
 
 data class WeatherData(
     val city: String,
@@ -57,19 +64,57 @@ data class WeatherData(
 )
 
 private object WeatherRepository {
-    suspend fun fetchWeather(city: String): WeatherData {
-        delay(1200)
+    private const val OPEN_WEATHER_BASE_URL = "https://api.openweathermap.org/data/2.5/weather"
 
+    suspend fun fetchWeather(city: String): WeatherData = withContext(Dispatchers.IO) {
         val normalizedCity = city.trim().ifBlank { "New York" }
-        val cityName = normalizedCity.replaceFirstChar { it.uppercase() }
+        val apiKey = BuildConfig.OPENWEATHER_API_KEY
 
-        return when (normalizedCity.lowercase()) {
-            "delhi" -> WeatherData(cityName, 31.0, "Sunny", 52, "Clear skies and warm weather")
-            "mumbai" -> WeatherData(cityName, 29.0, "Cloudy", 74, "Humid with scattered clouds")
-            "london" -> WeatherData(cityName, 18.0, "Rainy", 81, "Light rain in the evening")
-            "paris" -> WeatherData(cityName, 22.0, "Clear", 58, "Mild and pleasant")
-            "tokyo" -> WeatherData(cityName, 26.0, "Humid", 67, "Warm with high moisture")
-            else -> WeatherData(cityName, 24.0, "Partly Cloudy", 60, "A comfortable day overall")
+        if (apiKey.isBlank()) {
+            throw IllegalStateException("OpenWeather API key is missing. Add OPENWEATHER_API_KEY in local.properties")
+        }
+
+        val encodedCity = Uri.encode(normalizedCity)
+        val requestUrl = "$OPEN_WEATHER_BASE_URL?q=$encodedCity&appid=$apiKey&units=metric"
+        val connection = (URL(requestUrl).openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = 10000
+            readTimeout = 10000
+        }
+
+        try {
+            val responseCode = connection.responseCode
+            val responseBody = (if (responseCode in 200..299) {
+                connection.inputStream
+            } else {
+                connection.errorStream
+            })?.bufferedReader()?.use { it.readText() }.orEmpty()
+
+            if (responseCode !in 200..299) {
+                val apiMessage = runCatching {
+                    JSONObject(responseBody).optString("message")
+                }.getOrNull().orEmpty()
+                val message = apiMessage.ifBlank { "HTTP $responseCode" }
+                throw IOException("Failed to fetch weather: $message")
+            }
+
+            val json = JSONObject(responseBody)
+            val weatherObject = json.getJSONArray("weather").getJSONObject(0)
+            val mainObject = json.getJSONObject("main")
+
+            WeatherData(
+                city = json.optString("name").ifBlank { normalizedCity },
+                temperature = mainObject.getDouble("temp"),
+                condition = weatherObject.optString("main").ifBlank { "Unknown" },
+                humidity = mainObject.getInt("humidity"),
+                description = weatherObject
+                    .optString("description")
+                    .replaceFirstChar { ch ->
+                        if (ch.isLowerCase()) ch.titlecase(Locale.getDefault()) else ch.toString()
+                    }
+            )
+        } finally {
+            connection.disconnect()
         }
     }
 }
@@ -85,7 +130,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 }
-
 
 @Composable
 fun WeatherApp() {
